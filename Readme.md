@@ -5,7 +5,7 @@
 * Vedant Kohli
 
 ### Algorithm Description:
-#### Saturate maps
+#### Saturate maps:
 * repeat until no hills and dales are left or MAX_ITERATIONS reached
 * One thread launched for each cell.
 * 8 surrounding cells are checked.
@@ -23,3 +23,11 @@
 #### Reference papers:
 * For Concept: Parallel Graph Component Labelling with GPUs and CUDA. K.A. Hawick, A. Leist and D.P. Playne
 * For optimization: Connected component labeling on a 2D grid using CUDA. Oleksandr Kalentev, Abha Rai, Stefan Kemnitz and Ralf Schneider
+
+#### Testing environment:
+* GPU: Tesla K40
+* OS: Ubuntu 12.04 Kernel:3.2.0
+* CUDA Toolkit: 6.0.37
+* Driver: 331.62
+* CPU RAM: 16 GB
+* PCI Gen2/3
