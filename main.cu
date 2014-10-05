@@ -210,17 +210,6 @@ __global__ void analysisPhase(int *d_label, uint r, uint c) {
 	d_label[j_+i_*c_]=l;
 }
 
-__global__ void labellingPhase(uint *d_map, int *d_label, int *d_r_label, uint r, uint c) {
-	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
-	int i = idx/c;
-	int j = idx%c;
-	if(i >= r || j >= c)
-		return;
-	if(d_map[j+i*c] == 0)
-		return;
-	d_label[j+i*c]=d_r_label[d_label[j+i*c]];
-}
-
 __global__ void makeValuesOne(uint *d_map, int *d_label, uint r, uint c) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
 	uint i = idx/c;
@@ -280,37 +269,6 @@ void calcNPrintNumConnCompParallel(uint *map, uint rows, uint cols) {
 	std::cout << sum << std::endl;
 	cudaFree(d_map_in);
 	cudaFree(d_label);
-}
-
-void calcNPrintNumConnComp(uint *map, uint rows, uint cols) {
-	uint numComp = 0;
-	for(uint i = 0; i < rows; ++i) {
-		for(uint j = 0; j < cols; ++j) {
-			if(map[j+i*cols] == 1) {
-				map[j+i*cols]=0;
-				++numComp;
-				std::queue<uint> Q;
-				Q.push(j+i*cols);
-				while(!Q.empty()) {
-					uint idx = Q.front();
-					Q.pop();
-					int i_ = idx/cols;
-					int j_ = idx%cols;
-					for(int l = i_-1; l <= i_+1; ++l) {
-						for(int k = j_-1; k <= j_+1; ++k) {
-							if(l >= 0 && k >= 0 && l < rows && k < cols && !(l==i_ && k==j_)) {
-								if(map[k+l*cols]==1) {
-									map[k+l*cols] = 0;
-									Q.push(k+l*cols);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	std::cout << numComp << std::endl;
 }
 
 void processNPrintSol(uint *map, uint rows, uint cols) {
