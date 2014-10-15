@@ -18,7 +18,9 @@
  * and CUDA", Parallel Computing 36 (12) (2010) 655–678.
  * 2. O. Kalentev, A. Rai, S. Kemnitz, and R. Schneider, "Connected component labeling 
  * on a 2D grid using CUDA," J. Parallel Distributed Computing, pp. 615-620, 2011.
+ * General:
  * 3. NVIDIA, Cuda programming guide 6.5.
+ * Warp-Aggregated Atomics:
  * 4. CUDA Pro Tip: Optimized Filtering with Warp-Aggregated Atomics.
  * 
  * This code makes use of Label equivalence algorithm described in [2] for CCL.
@@ -26,8 +28,8 @@
 
 #include <stdlib.h>	//exit, malloc
 #include "input.h"	//getinput
-#include <thrust/device_vector.h>	//thrust::reduce one device pointer
-#include <stdio.h>	//print
+#include <thrust/device_vector.h>	//thrust::reduce
+#include <stdio.h>	//printf
 
 typedef unsigned int uint;
 
@@ -56,6 +58,7 @@ __global__ void analysis(int*, uint, uint);
 __global__ void computeNCC(uint*, int*, uint, uint);
 void printNCC(int*, uint, uint);
 
+//returns lane id of a thread in a warp
 __device__ inline int lane_id();
 //warp-aggregated atomic increment
 __device__ void atomicAggInc(uint*);
@@ -79,7 +82,7 @@ main(int argc, char **argv) {
 		numRows = input[offset];
 		numCols = input[offset + 1];
 		offset += 2;
-		printf("MAP #%d: ", i+1);
+		printf("MAP #%u: ", i+1);
 		processMap(input + offset, numRows, numCols);
 		offset += numRows * numCols;
 		i++;
