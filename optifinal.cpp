@@ -18,7 +18,9 @@
  * and CUDA", Parallel Computing 36 (12) (2010) 655–678.
  * 2. O. Kalentev, A. Rai, S. Kemnitz, and R. Schneider, "Connected component labeling 
  * on a 2D grid using CUDA," J. Parallel Distributed Computing, pp. 615-620, 2011.
+ * General:
  * 3. NVIDIA, Cuda programming guide 6.5.
+ * Warp-Aggregated Atomics:
  * 4. CUDA Pro Tip: Optimized Filtering with Warp-Aggregated Atomics.
  * 
  * This code makes use of Label equivalence algorithm described in [2] for CCL.
@@ -26,8 +28,8 @@
 
 #include <stdlib.h>	//exit, malloc
 #include "input.h"	//getinput
-#include <thrust/device_vector.h>	//thrust::reduce one device pointer
-#include <stdio.h>	//print
+#include <thrust/device_vector.h>	//thrust::reduce
+#include <stdio.h>	//printf
 
 typedef unsigned int uint;
 
@@ -50,12 +52,13 @@ __global__ void binarizeMapParallel(uint*, uint, uint, uint);
 
 //connected component labelling and finding number of connected components
 void performCCLnPrintNCC(uint*, uint, uint);
-__global__ void initLabels(int*, uint*, uint, uint);
-__global__ void scanning(int*, bool*, uint, uint);
-__global__ void analysis(int*, uint, uint);
-__global__ void computeNCC(uint*, int*, uint, uint);
-void printNCC(int*, uint, uint);
+__global__ void initLabels(uint*, uint*, uint, uint);
+__global__ void scanning(uint*, bool*, uint, uint);
+__global__ void analysis(uint*, uint, uint);
+void printNCC(uint*, uint, uint);
+__global__ void computeNCC(uint*, uint*, uint, uint);
 
+//returns lane id of a thread in a warp
 __device__ inline int lane_id();
 //warp-aggregated atomic increment
 __device__ void atomicAggInc(uint*);
@@ -79,7 +82,7 @@ main(int argc, char **argv) {
 		numRows = input[offset];
 		numCols = input[offset + 1];
 		offset += 2;
-		printf("MAP #%d: ", i+1);
+		printf("MAP #%u: ", i+1);
 		processMap(input + offset, numRows, numCols);
 		offset += numRows * numCols;
 		i++;
@@ -96,7 +99,7 @@ main(int argc, char **argv) {
 void
 saturateMap(uint *h_map, uint rows, uint cols) {
 	//variable dec
-	int netCells = rows*cols, iter = 0;
+	uint netCells = rows*cols, iter = 0;
 	uint *d_mapOut, *d_mapIn;
 	bool *d_notConverged, h_notConverged = true;//flags to check if values in map converged
 	dim3 threadsPerBlock(BLOCKSIZE);
@@ -151,7 +154,7 @@ saturateMap(uint *h_map, uint rows, uint cols) {
  * Other variants of this kernel which failed i.e. increased execution time:
  * -Shared Memory version increased execution time due to the synchronization barrier.
  *  It was observed that the net synchronization time was greater than the time to access 7
- *  extra global cells per thread.
+ *  extra global cells per thread in global version.
  * -Lookup table version which stores flag for each cell, whether the cell can be a hill or
  *  a dale in its lifetime. That means that if a cell and one of the surrounding cell has
  *  same value then that cell can never be a hill or a dale in its life time, this boolean
@@ -163,8 +166,8 @@ saturateMap(uint *h_map, uint rows, uint cols) {
 __global__ void
 saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint rows, uint cols) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
-	int i = idx/cols;
-	int j = idx%cols;
+	uint i = idx/cols;
+	uint j = idx%cols;
 	if(i >= rows || j >= cols)
 		return;
 	uint cell = j+i*cols;
@@ -174,11 +177,11 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 		return;
 	}
 	uint localMap[8];
-	int cntU = 0, cntD = 0, cnt = 0, sum = 0;
+	uint cntU = 0, cntD = 0, cnt = 0, sum = 0;
 
 	//checks if the cell is hill/dale/none
-	for(int l = i - 1; l <= i + 1; ++l) {
-		for(int k = j - 1; k <= j + 1; ++k) {
+	for(uint l = i - 1; l <= i + 1; ++l) {
+		for(uint k = j - 1; k <= j + 1; ++k) {
 			if(!(l == i && k == j)) {
 				localMap[cnt] = inputMap[k+l*cols];
 				sum += localMap[cnt];
@@ -219,12 +222,12 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 
 /*
  * binarizeMap description:
- * -Obtains threshold and passes it to the binarizeMapParallel (with one cell per thread)
+ * -Obtains threshold and passes it to the binarizeMapParallel (with one thread per cell)
  *  which puts the binarized map in d_input.
  */
 void
 binarizeMap(uint *d_input, uint rows, uint cols) {
-	int netCells = rows*cols, threshold;
+	uint netCells = rows*cols, threshold;
 	dim3 threadsPerBlock(BLOCKSIZE);
 	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1); 
 	threshold = calcThreshold(d_input, rows, cols);
@@ -238,9 +241,9 @@ binarizeMap(uint *d_input, uint rows, uint cols) {
  */
 int
 calcThreshold(uint *d_input, uint rows, uint cols) {
-	int sum, threshold;
+	uint sum, threshold;
 	thrust::device_ptr<uint> dev_ptr(d_input);
-	sum = thrust::reduce(dev_ptr, dev_ptr+rows*cols, (int)0, thrust::plus<int>());
+	sum = thrust::reduce(dev_ptr, dev_ptr+rows*cols, (uint)0, thrust::plus<uint>());
 	threshold = sum/(rows*cols);
 	return threshold;
 }
@@ -273,15 +276,15 @@ binarizeMapParallel(uint *inputMap, uint rows, uint cols, uint threshold) {
 void
 performCCLnPrintNCC(uint *d_input, uint rows, uint cols) {
 	//variable declaration
-	int netCells = rows*cols;
-	int *d_label; 
+	uint netCells = rows*cols;
+	uint *d_label; 
 	bool h_notConverged = true, *d_notConverged;
 	uint rowsPad = rows+2, colsPad = cols+2;
 	dim3 threadsPerBlock(BLOCKSIZE);
 	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1);
 
 	//memory allocation
-	cudaMalloc((void**)&d_label, rowsPad*colsPad*sizeof(int));
+	cudaMalloc((void**)&d_label, rowsPad*colsPad*sizeof(uint));
 	cudaMalloc((void**)&d_notConverged, sizeof(bool));
 
 	//initializing labels
@@ -310,18 +313,18 @@ performCCLnPrintNCC(uint *d_input, uint rows, uint cols) {
  *  else if it's value is 1 then label of that cell will be the sequential index of that cell.
  */
 __global__ void
-initLabels(int *label, uint *map, uint rows, uint cols) {
+initLabels(uint *label, uint *map, uint rows, uint cols) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
-	int i = idx/cols;
-	int j = idx%cols;
+	uint i = idx/cols;
+	uint j = idx%cols;
 	if(i >= rows || j >= cols)
 		return;
-	int cell_ = j+(i)*(cols);
+	uint cell_ = j+(i)*(cols);
 	if(i == 0 || i == rows-1 || j == 0 || j == cols-1) {
 		label[cell_]=0;
 		return;
 	}
-	int cell = j-1+(i-1)*(cols-2);
+	uint cell = j-1+(i-1)*(cols-2);
 	label[cell_]=(cell_)*map[cell];
 }
 
@@ -332,35 +335,35 @@ initLabels(int *label, uint *map, uint rows, uint cols) {
  *  not converged else do nothing.
  */
 __global__ void
-scanning(int *label, bool *notConverged, uint rows, uint cols) {
+scanning(uint *label, bool *notConverged, uint rows, uint cols) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
-	int i = idx/cols;
-	int j = idx%cols;
+	uint i = idx/cols;
+	uint j = idx%cols;
 	if(i >= rows || j >= cols)
 		return;
-	int cell_ = j+1+(i+1)*(cols+2);
-	int l = label[cell_];
+	uint cell_ = j+1+(i+1)*(cols+2);
+	uint l = label[cell_];
 	if(l == 0)
 		return;
-	int lw = label[cell_-1];
-	int minl = (rows+2)*(cols+2) + 1;
+	uint lw = label[cell_-1];
+	uint minl = (rows+2)*(cols+2) + 1;
 	if(lw)minl=lw;
-	int le = label[cell_+1];
+	uint le = label[cell_+1];
 	if(le&&le<minl)minl=le;
-	int lwn = label[cell_-cols-3];
+	uint lwn = label[cell_-cols-3];
 	if(lwn&&lwn<minl)minl=lwn;
-	int lws = label[cell_+cols+1];
+	uint lws = label[cell_+cols+1];
 	if(lws&&lws<minl)minl=lws;
-	int len = label[cell_-cols-1];
+	uint len = label[cell_-cols-1];
 	if(len&&len<minl)minl=len;
-	int les = label[cell_+cols+3];
+	uint les = label[cell_+cols+3];
 	if(les&&les<minl)minl=les;
-	int ln = label[cell_-cols-2];
+	uint ln = label[cell_-cols-2];
 	if(ln&&ln<minl)minl=ln;
-	int ls = label[cell_+cols+2];
+	uint ls = label[cell_+cols+2];
 	if(ls&&ls<minl)minl=ls;
 	if(minl < l) {
-		int ll = label[l];
+		uint ll = label[l];
 		if(minl<ll)
 			label[l]=minl;
 		else
@@ -377,42 +380,22 @@ scanning(int *label, bool *notConverged, uint rows, uint cols) {
  * -Relabels the cell represented by idx with VAL.
  */
 __global__ void
-analysis(int *label, uint rows, uint cols) {
+analysis(uint *label, uint rows, uint cols) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
-	int i = idx/cols;
-	int j = idx%cols;
+	uint i = idx/cols;
+	uint j = idx%cols;
 	if(i >= rows || j >= cols)
 		return;
-	int cell_ = j+1+(i+1)*(cols+2);
-	int l = label[cell_];
+	uint cell_ = j+1+(i+1)*(cols+2);
+	uint l = label[cell_];
 	if(l == 0)
 		return;
-	int ref = label[l];
+	uint ref = label[l];
 	while(ref!=l) {
 		l=label[ref];
 		ref=label[l];
 	}
 	label[cell_]=l;
-}
-
-/*
- * computeNCC description:
- * -If value of the label represented by idx is same as its index then do atomicAggInc 
- *  else return (label must be nonzero).
- */
-__global__ void
-computeNCC(uint *ncomp, int *label, uint rows, uint cols) {
-	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
-	int i = idx/cols;
-	int j = idx%cols;
-	if(i >= rows || j >= cols)
-		return;
-	int cell_ = j+1+(i+1)*(cols+2);
-	int l = label[cell_];
-	if(l == 0)
-		return;
-	if(l==cell_)
-		atomicAggInc(ncomp);
 }
 
 /*
@@ -422,8 +405,8 @@ computeNCC(uint *ncomp, int *label, uint rows, uint cols) {
  * -And then it prints ncc(number of connected components).
  */
 void
-printNCC(int *d_input, uint rows, uint cols) {
-	int netCells = rows*cols;
+printNCC(uint *d_input, uint rows, uint cols) {
+	uint netCells = rows*cols;
 	dim3 threadsPerBlock(BLOCKSIZE);
 	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1);
 	uint *ncomp, ncc;
@@ -438,6 +421,27 @@ printNCC(int *d_input, uint rows, uint cols) {
 	printf("%u\n", ncc);
 	//free up the memory
 	cudaFree(ncomp);
+}
+
+
+/*
+ * computeNCC description:
+ * -If value of the label represented by idx is same as its index then do atomicAggInc 
+ *  else return (label must be nonzero).
+ */
+__global__ void
+computeNCC(uint *ncomp, uint *label, uint rows, uint cols) {
+	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
+	uint i = idx/cols;
+	uint j = idx%cols;
+	if(i >= rows || j >= cols)
+		return;
+	uint cell_ = j+1+(i+1)*(cols+2);
+	uint l = label[cell_];
+	if(l == 0)
+		return;
+	if(l==cell_)
+		atomicAggInc(ncomp);
 }
 
 /*
