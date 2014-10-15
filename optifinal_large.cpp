@@ -25,7 +25,7 @@
  */
 
 #include <stdlib.h>	//exit, malloc
-#include "input.h"	//getinput
+#include "input_large.h"	//getinput
 #include <thrust/device_vector.h>	//thrust::reduce one device pointer
 #include <stdio.h>	//print
 

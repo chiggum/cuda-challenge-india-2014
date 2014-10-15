@@ -60,9 +60,24 @@ __device__ inline int lane_id();
 //warp-aggregated atomic increment
 __device__ void atomicAggInc(uint*);
 
+uint *get_my_input() {
+	int MYSIZE = 16384;
+	uint *input = new uint[3+MYSIZE*MYSIZE];
+	input[0]=1;
+	input[1]=MYSIZE;
+	input[2]=MYSIZE;
+	for(int i = 0; i < MYSIZE; ++i) {
+		for(int j = 0; j < MYSIZE; ++j) {
+			input[3+j+i*MYSIZE] =1;
+		}
+	}
+	return input;
+}
+
+
 int
 main(int argc, char **argv) {
-	uint *input = get_input();
+	uint *input = get_my_input();
 	uint numMaps;
 	uint numRows, numCols;
 

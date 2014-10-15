@@ -3,7 +3,7 @@ use File::Compare;
 use strict;
 
 print "Checking for input.h and main.cu ... ";
-my $fileName = "input.h";
+my $fileName = "input_large.h";
 unless(-e $fileName) {
     print "\n[Error] File $fileName does not exist.\n";
     exit 1;
@@ -48,7 +48,7 @@ print "done\n";
 
 print "Checking for application output ... ";
 # Compare the file with expected output
-if(compare("hillsAndDales.log","expected_output")) {
+if(compare("hillsAndDales.log","expected_output_large")) {
     print "\n[Error] Application output does not match with the expected output.\n";
     print "\n[Error] Application Output\n";
     if(open(MYFILE, "hillsAndDales.log")) {
@@ -61,7 +61,7 @@ if(compare("hillsAndDales.log","expected_output")) {
     close MYFILE;
     
     print "[Error] Expected Output\n";
-    if(open(MYFILE, "expected_output")) {
+    if(open(MYFILE, "expected_output_large")) {
         my $line = <MYFILE>;
         while($line ne "") {
             print $line;

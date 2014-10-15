@@ -10,7 +10,7 @@
  * main -> processMap -> saturateMap -> saturateMapParallel ->
  * binarizeMap -> calcThreshold -> binarizeMapParallel -> 
  * performCCLnPrintNCC -> initLabels -> scanning -> analysis ->
- * printNCC -> computeNCC
+ * makeOnePointPerCC -> printNCC
  *
  * References:
  * Connected Component Labelling:
@@ -19,10 +19,10 @@
  * 2. O. Kalentev, A. Rai, S. Kemnitz, and R. Schneider, "Connected component labeling 
  * on a 2D grid using CUDA," J. Parallel Distributed Computing, pp. 615-620, 2011.
  * 3. NVIDIA, Cuda programming guide 6.5.
- * 4. CUDA Pro Tip: Optimized Filtering with Warp-Aggregated Atomics.
  * 
  * This code makes use of Label equivalence algorithm described in [2] for CCL.
  */
+
 
 #include <stdlib.h>	//exit, malloc
 #include "input.h"	//getinput
@@ -32,7 +32,6 @@
 typedef unsigned int uint;
 
 #define BLOCKSIZE 256
-#define WARP_SZ 32
 #define cudaMemcpyHTD(dest, src, nBytes) cudaMemcpy(dest, src, nBytes, cudaMemcpyHostToDevice)
 #define cudaMemcpyDTH(dest, src, nBytes) cudaMemcpy(dest, src, nBytes, cudaMemcpyDeviceToHost)
 
@@ -53,12 +52,8 @@ void performCCLnPrintNCC(uint*, uint, uint);
 __global__ void initLabels(int*, uint*, uint, uint);
 __global__ void scanning(int*, bool*, uint, uint);
 __global__ void analysis(int*, uint, uint);
-__global__ void computeNCC(uint*, int*, uint, uint);
-void printNCC(int*, uint, uint);
-
-__device__ inline int lane_id();
-//warp-aggregated atomic increment
-__device__ void atomicAggInc(uint*);
+__global__ void markOnePointPerCC(uint*, int*, uint, uint);
+void printNCC(uint*, uint, uint);
 
 int
 main(int argc, char **argv) {
@@ -268,7 +263,9 @@ binarizeMapParallel(uint *inputMap, uint rows, uint cols, uint threshold) {
  * performCCLnPrintNCC description:
  * -Uses the algorithm mentioned in reference[2] to label the connected components of
  *  the input binary map.
- * -Then calls printNCC to calculate and print the no. of conn. comp. in the labelled map.
+ * -Calls markOnePointPerCC which marks only one cell of each connected component.
+ * -Then calls printNCC to calculate the number of cells which are marked and that
+ *  number will be the number of components.
  */
 void
 performCCLnPrintNCC(uint *d_input, uint rows, uint cols) {
@@ -296,7 +293,9 @@ performCCLnPrintNCC(uint *d_input, uint rows, uint cols) {
 			analysis<<<numBlocks, threadsPerBlock>>>(d_label, rows, cols);
 		}
 	}
-	printNCC(d_label, rows, cols);
+
+	markOnePointPerCC<<<numBlocks, threadsPerBlock>>>(d_input, d_label, rows, cols);
+	printNCC(d_input, rows, cols);
 
 	//free up the memory
 	cudaFree(d_notConverged);
@@ -396,48 +395,39 @@ analysis(int *label, uint rows, uint cols) {
 }
 
 /*
- * computeNCC description:
- * -If value of the label represented by idx is same as its index then do atomicAggInc 
- *  else return (label must be nonzero).
+ * markOnePointPerCC description:
+ * -If value of the label represented by idx is same as its index then assign the corresponding
+ *  cell in map, the value 1 else 0.
  */
 __global__ void
-computeNCC(uint *ncomp, int *label, uint rows, uint cols) {
+markOnePointPerCC(uint *map, int *label, uint rows, uint cols) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
 	int i = idx/cols;
 	int j = idx%cols;
 	if(i >= rows || j >= cols)
 		return;
+	int cell = j+i*cols;
+	map[cell]=0;
 	int cell_ = j+1+(i+1)*(cols+2);
 	int l = label[cell_];
 	if(l == 0)
 		return;
 	if(l==cell_)
-		atomicAggInc(ncomp);
+		map[cell]=1;
 }
 
 /*
  * printNCC description:
- * -Calls computeNCC which computes the number of connected components in d_input
- *  which is nothing but the labels which match their sequential indices.
- * -And then it prints ncc(number of connected components).
+ * -Calculates the number of Ones in d_input (which is a binary map) by summing
+ *  over all values of the cells using thrust::reduce.
+ * -Prints this sum which is nothing but the number of components.
  */
 void
-printNCC(int *d_input, uint rows, uint cols) {
-	int netCells = rows*cols;
-	dim3 threadsPerBlock(BLOCKSIZE);
-	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1);
-	uint *ncomp, ncc;
-	//memory allocation and memset ncomp to zero
-	cudaMalloc((void**)&ncomp, sizeof(uint));
-	cudaMemset(ncomp, 0, sizeof(uint));
-	//computes n0. of conn. comp. and stores in ncomp
-	computeNCC<<<numBlocks, threadsPerBlock>>>(ncomp, d_input, rows, cols);
-	//copy data(ncomp) from device to host
-	cudaMemcpyDTH(&ncc, ncomp, sizeof(uint));
-	//print ncc
-	printf("%u\n", ncc);
-	//free up the memory
-	cudaFree(ncomp);
+printNCC(uint *d_input, uint rows, uint cols) {
+	int numCC;
+	thrust::device_ptr<uint> dev_ptr1(d_input);
+	numCC = thrust::reduce(dev_ptr1, dev_ptr1+rows*cols, (int) 0, thrust::plus<int>());
+	printf("%d\n", numCC);
 }
 
 /*
@@ -447,27 +437,4 @@ printNCC(int *d_input, uint rows, uint cols) {
 void
 processMap(uint *map, uint rows, uint cols) {
 	saturateMap(map, rows, cols);
-}
-
-/*
- * returns lane id of a thread.
- */
-__device__ inline int 
-lane_id(void) {
-	return threadIdx.x % WARP_SZ;
-}
-
-/*
- * warp-aggregated atomic increment.
- * Refer: http://devblogs.nvidia.com/parallelforall/cuda-pro-tip-optimized-filtering-warp-aggregated-atomics/
- * for explanation of Why AtomicAggInc is faster than thrust and atomicAdd.
- */
-__device__ void 
-atomicAggInc(uint *ctr) {
-  int mask = __ballot(1);
-  // select the leader
-  int leader = __ffs(mask) - 1;
-  // leader does the update
-  if(lane_id() == leader)
-    atomicAdd(ctr, __popc(mask));
 }
