@@ -198,7 +198,6 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 			}
 		}
 	}
-	outputMap[cell] = focusElem;
 	if(cntU == 8) {//hill
 		outputMap[cell]=sum/8;
 		*notConverged = false;
@@ -215,6 +214,8 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 		}
 		outputMap[cell] = (localMap[3]+localMap[4])/2;
 		*notConverged = false;
+	} else {//none
+		outputMap[cell] = focusElem;
 	}
 		
 }
@@ -260,7 +261,10 @@ binarizeMapParallel(uint *inputMap, uint rows, uint cols, uint threshold) {
 	if(i >= rows || j >= cols)
 		return;
 	uint cell = j+i*cols;
-	inputMap[cell] = (uint)(inputMap[cell]/threshold);
+	if(inputMap[cell] < threshold)
+		inputMap[cell]=0;
+	else
+		inputMap[cell]=1;
 }
 
 /*

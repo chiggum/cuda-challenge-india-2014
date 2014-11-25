@@ -63,6 +63,18 @@ __device__ inline int lane_id();
 //warp-aggregated atomic increment
 __device__ void atomicAggInc(uint*);
 
+__global__ void findIfDaleOrHill(uint *inputMap, uint* localMap, uint i, uint j, uint cols, bool *isDale, bool *isHill, uint focusElem, uint *sum) {
+	uint idx = threadIdx.x;
+	if(idx==4)
+		return;
+	*sum += (localMap[idx] = inputMap[j-(idx%3==0)+(idx%3==2) + (i-(idx<3)+(idx>5))*cols]);
+
+	if(localMap[idx]>focusElem)
+		*isDale=false;
+	if(localMap[idx]<focusElem)
+		*isHill=false;
+}
+
 int
 main(int argc, char **argv) {
 	uint *input = get_input();
@@ -100,7 +112,7 @@ void
 saturateMap(uint *h_map, uint rows, uint cols) {
 	//variable dec
 	uint netCells = rows*cols, iter = 0;
-	uint *d_mapOut, *d_mapIn;
+	uint *d_mapOut, *d_mapIn, *param;
 	bool *d_notConverged, h_notConverged = true;//flags to check if values in map converged
 	dim3 threadsPerBlock(BLOCKSIZE);
 	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1); 
@@ -110,17 +122,18 @@ saturateMap(uint *h_map, uint rows, uint cols) {
 	cudaMalloc((void**)&d_mapOut, rows*cols*sizeof(uint));
 	cudaMalloc((void**)&d_notConverged, sizeof(bool));
 	cudaMemcpyHTD(d_mapIn, h_map, rows*cols*sizeof(uint));
-
+	cudaMalloc((void**)&param, 11*sizeof(uint));
+	cudaMemset(param, 0, 11*sizeof(uint));
 	//processing
 	while(1) {
 		cudaMemcpyHTD(d_notConverged, &h_notConverged, sizeof(bool));
 		if(NUM_ITERATIONS != 0) {
 			if(iter%2==0)
 				saturateMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapIn, d_mapOut, 
-					d_notConverged, rows, cols);
+					d_notConverged, rows, cols, param);
 			else
 				saturateMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapOut, d_mapIn, 
-					d_notConverged, rows, cols);
+					d_notConverged, rows, cols, param);
 		}
 		cudaMemcpyDTH(&h_notConverged, d_notConverged, sizeof(bool));
 		h_notConverged = !h_notConverged;
@@ -164,7 +177,7 @@ saturateMap(uint *h_map, uint rows, uint cols) {
  *
  */
 __global__ void
-saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint rows, uint cols) {
+saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint rows, uint cols, uint *param) {
 	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
 	uint i = idx/cols;
 	uint j = idx%cols;
@@ -176,33 +189,19 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 		outputMap[cell] = focusElem;
 		return;
 	}
-	uint localMap[8];
-	uint cntU = 0, cntD = 0, cnt = 0, sum = 0;
+	uint *localMap = param;
+	uint *sum = param + 8;
+	uint *isDale = param + 9, *isHill = param + 10;
 
+	findIfDaleOrHill<<<1, 9>>>(inputMap, localMap, i, j, cols, isDale, isHill, focusElem, sum);
 	//checks if the cell is hill/dale/none
-	for(uint l = i - 1; l <= i + 1; ++l) {
-		for(uint k = j - 1; k <= j + 1; ++k) {
-			if(!(l == i && k == j)) {
-				localMap[cnt] = inputMap[k+l*cols];
-				sum += localMap[cnt];
-				if(localMap[cnt] > focusElem)
-					++cntD;
-				else if(localMap[cnt] < focusElem)
-					++cntU;
-				else {
-					//cell is neither hill nor dale and can never be in its lifetime
-					outputMap[cell]=focusElem;
-					return;
-				}
-				++cnt;
-			}
-		}
-	}
-	outputMap[cell] = focusElem;
-	if(cntU == 8) {//hill
-		outputMap[cell]=sum/8;
+	if(!isDale[0] && !isHill[0]) {
+		outputMap[cell]=focusElem;
+		return;
+	} else if(isHill[0]){//hill
+		outputMap[cell]=sum[0]/8;
 		*notConverged = false;
-	} else if(cntD == 8) {//dale
+	} else{//dale
 		//sorting to get first 5 terms in sorted array localMap
 		for(int l = 0; l < 4; ++l) {
 			for(int k = 0; k < 7 - l; ++k) {
@@ -260,7 +259,10 @@ binarizeMapParallel(uint *inputMap, uint rows, uint cols, uint threshold) {
 	if(i >= rows || j >= cols)
 		return;
 	uint cell = j+i*cols;
-	inputMap[cell] = (uint)(inputMap[cell]/threshold);
+	if(inputMap[cell] < threshold)
+		inputMap[cell]=0;
+	else
+		inputMap[cell]=1;
 }
 
 /*

@@ -39,23 +39,23 @@ typedef unsigned int uint;
 #define cudaMemcpyDTH(dest, src, nBytes) cudaMemcpy(dest, src, nBytes, cudaMemcpyDeviceToHost)
 
 //process map
-void processMap(uint*, uint, uint);
+__device__ void processMap(uint*, uint, uint);
 
 //finding hills and dales and replacing by mean and median respectively
-void saturateMap(uint*, uint, uint);
+__device__ void saturateMap(uint*, uint, uint);
 __global__ void saturateMapParallel(uint*, uint*, bool*, uint, uint);
 
 //binarize map
-void binarizeMap(uint*, uint, uint);
-int calcThreshold(uint*, uint, uint);
+__device__ void binarizeMap(uint*, uint, uint);
+__device__ int calcThreshold(uint*, uint, uint);
 __global__ void binarizeMapParallel(uint*, uint, uint, uint);
 
 //connected component labelling and finding number of connected components
-void performCCLnPrintNCC(uint*, uint, uint);
+__device__ void performCCLnPrintNCC(uint*, uint, uint);
 __global__ void initLabels(uint*, uint*, uint, uint);
 __global__ void scanning(uint*, bool*, uint, uint);
 __global__ void analysis(uint*, uint, uint);
-void printNCC(uint*, uint, uint);
+__device__ void printNCC(uint*, uint, uint);
 __global__ void computeNCC(uint*, uint*, uint, uint);
 
 //returns lane id of a thread in a warp
@@ -63,11 +63,169 @@ __device__ inline int lane_id();
 //warp-aggregated atomic increment
 __device__ void atomicAggInc(uint*);
 
+__global__ void sumKernel(uint *x, uint n, uint *sum) {
+	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
+	if(idx>=n)
+		return;
+	if(x[idx]==1)
+		atomicAggInc(sum);
+}
+
+__global__ void processMap2(uint *input, uint *numRows, uint *numCols, uint numMaps, uint *offset, uint *d_output) {
+	uint idx = threadIdx.x + blockIdx.x*blockDim.x;
+	if(idx >= numMaps)
+		return;
+	//printf("parent 0 %u\n", idx);
+	//uint *h_map = input+offset[idx];
+	uint rows = numRows[idx];
+	uint cols = numCols[idx];
+	//variable dec
+	printf("process start...\n");
+	uint netCells = rows*cols, iter = 0;
+	uint *d_mapOut, *d_mapIn;
+	bool *d_notConverged=new bool[1], h_notConverged = true;//flags to check if values in map converged
+	dim3 threadsPerBlock(BLOCKSIZE);
+	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1); 
+
+	//memory allocation on device and copy map data from host to device
+	//d_mapIn = (uint*)malloc(rows*cols*sizeof(uint));
+	d_mapIn = input+offset[idx];
+	d_mapOut = d_output+offset[idx];
+	//memcpy(d_mapIn, input+offset[idx], rows*cols*sizeof(uint));
+	//d_mapIn = input+offset[idx];
+	printf("Saturate Map started...\n");
+	
+	//processing
+	while(1) {
+		printf("%u\n", iter);
+		memcpy(d_notConverged, &h_notConverged, sizeof(bool));
+		if(NUM_ITERATIONS != 0) {
+			if(iter%2==0)
+				saturateMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapIn, d_mapOut, 
+					d_notConverged, rows, cols);
+			else
+				saturateMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapOut, d_mapIn, 
+					d_notConverged, rows, cols);
+		}
+		memcpy(&h_notConverged, d_notConverged, sizeof(bool));
+		h_notConverged = !h_notConverged;
+		++iter;break;
+		//converged or max number of iterations reached
+		if(iter >= NUM_ITERATIONS || !h_notConverged) {/*
+			if(iter%2==1) {
+				printf("Saturate map done...\n");
+				uint threshold;
+				uint *sum;
+				sum = (uint*)malloc(sizeof(uint));
+				//malloc(sum, sizeof(uint));
+				memset(sum, 0, sizeof(uint));
+				sumKernel<<<numBlocks, threadsPerBlock>>>(d_mapOut, netCells, sum);
+				threshold = *sum/(rows*cols);
+				binarizeMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapOut, rows, cols, threshold);
+				printf("binarize map done...\n");
+				//variable declaration
+				uint *d_label; 
+				h_notConverged = true;
+				uint rowsPad = rows+2, colsPad = cols+2;
+
+				//memory allocation
+				d_label = (uint*)malloc(rowsPad*colsPad*sizeof(uint));
+				//malloc(d_label, rowsPad*colsPad*sizeof(uint));
+
+				//initializing labels
+				initLabels<<<(rowsPad*colsPad-1)/threadsPerBlock.x+1, threadsPerBlock>>>(d_label, d_mapOut, rowsPad, colsPad); 
+				//computation
+				while(h_notConverged) {
+					memcpy(d_notConverged, &h_notConverged, sizeof(bool));
+					scanning<<<numBlocks, threadsPerBlock>>>(d_label, d_notConverged, rows, cols);
+					memcpy(&h_notConverged, d_notConverged, sizeof(bool));
+					h_notConverged = !h_notConverged;
+					if(h_notConverged) {
+						analysis<<<numBlocks, threadsPerBlock>>>(d_label, rows, cols);
+					}
+				}
+				uint *ncomp, ncc;
+				//memory allocation and memset ncomp to zero
+				ncomp = (uint*)malloc(sizeof(uint));
+				//malloc(ncomp, sizeof(uint));
+				memset(ncomp, 0, sizeof(uint));
+				//computes n0. of conn. comp. and stores in ncomp
+				computeNCC<<<numBlocks, threadsPerBlock>>>(ncomp, d_label, rows, cols);
+				//copy data(ncomp) from device to host
+				memcpy(&ncc, ncomp, sizeof(uint));
+				//print ncc
+				printf("%u\n", ncc);
+				//free up the memory
+				free(ncomp);
+
+				//free up the memory
+				free(d_label);
+				printf("answer map done...\n");
+			} else {
+				printf("Saturate map done...\n");
+				uint threshold;
+				uint *sum;
+				sum = (uint*)malloc(sizeof(uint));
+				//malloc(sum, sizeof(uint));
+				memset(sum, 0, sizeof(uint));
+				sumKernel<<<numBlocks, threadsPerBlock>>>(d_mapIn, netCells, sum);
+				threshold = *sum/(rows*cols);
+				binarizeMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapIn, rows, cols, threshold);
+				printf("binarize map done...\n");
+				//variable declaration
+				uint *d_label; 
+				h_notConverged = true;
+				uint rowsPad = rows+2, colsPad = cols+2;
+
+				//memory allocation
+				//malloc(d_label, rowsPad*colsPad*sizeof(uint));
+				d_label = (uint*)malloc(rowsPad*colsPad*sizeof(uint));
+				//initializing labels
+				initLabels<<<(rowsPad*colsPad-1)/threadsPerBlock.x+1, threadsPerBlock>>>(d_label, d_mapIn, rowsPad, colsPad); 
+				//computation
+				while(h_notConverged) {
+					memcpy(d_notConverged, &h_notConverged, sizeof(bool));
+					scanning<<<numBlocks, threadsPerBlock>>>(d_label, d_notConverged, rows, cols);
+					memcpy(&h_notConverged, d_notConverged, sizeof(bool));
+					h_notConverged = !h_notConverged;
+					if(h_notConverged) {
+						analysis<<<numBlocks, threadsPerBlock>>>(d_label, rows, cols);
+					}
+				}
+				uint *ncomp, ncc;
+				//memory allocation and memset ncomp to zero
+				//malloc(ncomp, sizeof(uint));
+				ncomp = (uint*)malloc(sizeof(uint));
+				memset(ncomp, 0, sizeof(uint));
+				//computes n0. of conn. comp. and stores in ncomp
+				computeNCC<<<numBlocks, threadsPerBlock>>>(ncomp, d_label, rows, cols);
+				//copy data(ncomp) from device to host
+				memcpy(&ncc, ncomp, sizeof(uint));
+				//print ncc
+				printf("%u\n", ncc);
+				//free up the memory
+				free(ncomp);
+
+				//free up the memory
+				free(d_label);
+				printf("answer map done...\n");
+			}*/
+			break;
+		}
+	}
+
+	//free up the memory
+	free(d_mapOut);
+	
+}
+
+
+
 int
 main(int argc, char **argv) {
 	uint *input = get_input();
 	uint numMaps;
-	uint numRows, numCols;
+	uint *numRows, *numCols;
 
 	if(input != NULL) {
 		numMaps = input[0];
@@ -75,18 +233,39 @@ main(int argc, char **argv) {
 		printf("Error: input is NULL!\n");
 		std::exit(EXIT_FAILURE);
 	}
+	numRows = new uint[numMaps];
+	numCols = new uint[numMaps];
 
 	uint i = 0;
 	uint offset = 1;
+	uint *off = new uint[numMaps];
 	while(i < numMaps) {
-		numRows = input[offset];
-		numCols = input[offset + 1];
+		numRows[i] = input[offset];
+		numCols[i] = input[offset + 1];
 		offset += 2;
-		printf("MAP #%u: ", i+1);
-		processMap(input + offset, numRows, numCols);
-		offset += numRows * numCols;
+		off[i] = offset;
+		//printf("MAP #%u: ", i+1);
+		//processMap(input + offset, numRows, numCols);
+		offset += numRows[i] * numCols[i];
 		i++;
 	}
+	uint *numRows2, *numCols2, *off2, *input2, *out;
+	cudaMalloc((void**)&input2, offset*sizeof(uint));
+	cudaMalloc((void**)&out, offset*sizeof(uint));
+	cudaMalloc((void**)&numRows2, numMaps*sizeof(uint));
+	cudaMalloc((void**)&numCols2, numMaps*sizeof(uint));
+	cudaMalloc((void**)&off2, numMaps*sizeof(uint));
+	cudaMemcpyHTD(numRows2, numRows, numMaps*sizeof(uint));
+	cudaMemcpyHTD(numCols2, numCols, numMaps*sizeof(uint));
+	cudaMemcpyHTD(off2, off, numMaps*sizeof(uint));
+	cudaMemcpyHTD(input2, input, offset*sizeof(uint));
+	dim3 threadsPerBlock(BLOCKSIZE);
+	dim3 numBlocks((numMaps-1)/threadsPerBlock.x + 1); 
+	processMap2<<<numBlocks, threadsPerBlock>>>(input2, numRows2, numCols2, numMaps, off, out);
+	delete[] numRows;
+	delete[] numCols;
+	cudaFree(numRows2);
+	cudaFree(numCols2);
 	return 0;
 }
 /*
@@ -96,9 +275,10 @@ main(int argc, char **argv) {
  *  max iterations.
  * -Once saturated, the map is binarized and CCL is performed over binarized map.
  */
-void
+__device__ void
 saturateMap(uint *h_map, uint rows, uint cols) {
 	//variable dec
+	printf("Saturate map started...\n");
 	uint netCells = rows*cols, iter = 0;
 	uint *d_mapOut, *d_mapIn;
 	bool *d_notConverged, h_notConverged = true;//flags to check if values in map converged
@@ -109,11 +289,11 @@ saturateMap(uint *h_map, uint rows, uint cols) {
 	cudaMalloc((void**)&d_mapIn, rows*cols*sizeof(uint));
 	cudaMalloc((void**)&d_mapOut, rows*cols*sizeof(uint));
 	cudaMalloc((void**)&d_notConverged, sizeof(bool));
-	cudaMemcpyHTD(d_mapIn, h_map, rows*cols*sizeof(uint));
+	memcpy(d_mapIn, h_map, rows*cols*sizeof(uint));
 
 	//processing
 	while(1) {
-		cudaMemcpyHTD(d_notConverged, &h_notConverged, sizeof(bool));
+		memcpy(d_notConverged, &h_notConverged, sizeof(bool));
 		if(NUM_ITERATIONS != 0) {
 			if(iter%2==0)
 				saturateMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapIn, d_mapOut, 
@@ -122,17 +302,103 @@ saturateMap(uint *h_map, uint rows, uint cols) {
 				saturateMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapOut, d_mapIn, 
 					d_notConverged, rows, cols);
 		}
-		cudaMemcpyDTH(&h_notConverged, d_notConverged, sizeof(bool));
+		memcpy(&h_notConverged, d_notConverged, sizeof(bool));
 		h_notConverged = !h_notConverged;
 		++iter;
 		//converged or max number of iterations reached
 		if(iter >= NUM_ITERATIONS || !h_notConverged) {
 			if(iter%2==1) {
-				binarizeMap(d_mapOut, rows, cols);
-				performCCLnPrintNCC(d_mapOut, rows, cols);
+				printf("Saturate map done...\n");
+				uint threshold;
+				uint *sum;
+				cudaMalloc((void**)&sum, sizeof(uint));
+				memset(sum, 0, sizeof(uint));
+				sumKernel<<<numBlocks, threadsPerBlock>>>(d_mapOut, netCells, sum);
+				threshold = *sum/(rows*cols);
+				binarizeMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapOut, rows, cols, threshold);
+				printf("binarize map done...\n");
+				//variable declaration
+				uint *d_label; 
+				h_notConverged = true;
+				uint rowsPad = rows+2, colsPad = cols+2;
+
+				//memory allocation
+				cudaMalloc((void**)&d_label, rowsPad*colsPad*sizeof(uint));
+
+				//initializing labels
+				initLabels<<<(rowsPad*colsPad-1)/threadsPerBlock.x+1, threadsPerBlock>>>(d_label, d_mapOut, rowsPad, colsPad); 
+				//computation
+				while(h_notConverged) {
+					memcpy(d_notConverged, &h_notConverged, sizeof(bool));
+					scanning<<<numBlocks, threadsPerBlock>>>(d_label, d_notConverged, rows, cols);
+					memcpy(&h_notConverged, d_notConverged, sizeof(bool));
+					h_notConverged = !h_notConverged;
+					if(h_notConverged) {
+						analysis<<<numBlocks, threadsPerBlock>>>(d_label, rows, cols);
+					}
+				}
+				uint *ncomp, ncc;
+				//memory allocation and memset ncomp to zero
+				cudaMalloc((void**)&ncomp, sizeof(uint));
+				memset(ncomp, 0, sizeof(uint));
+				//computes n0. of conn. comp. and stores in ncomp
+				computeNCC<<<numBlocks, threadsPerBlock>>>(ncomp, d_label, rows, cols);
+				//copy data(ncomp) from device to host
+				memcpy(&ncc, ncomp, sizeof(uint));
+				//print ncc
+				printf("%u\n", ncc);
+				//free up the memory
+				cudaFree(ncomp);
+
+				//free up the memory
+				cudaFree(d_label);
+				printf("answer map done...\n");
 			} else {
-				binarizeMap(d_mapIn, rows, cols);
-				performCCLnPrintNCC(d_mapIn, rows, cols);
+				printf("Saturate map done...\n");
+				uint threshold;
+				uint *sum;
+				cudaMalloc((void**)&sum, sizeof(uint));
+				memset(sum, 0, sizeof(uint));
+				sumKernel<<<numBlocks, threadsPerBlock>>>(d_mapIn, netCells, sum);
+				threshold = *sum/(rows*cols);
+				binarizeMapParallel<<<numBlocks, threadsPerBlock>>>(d_mapIn, rows, cols, threshold);
+				printf("binarize map done...\n");
+				//variable declaration
+				uint *d_label; 
+				h_notConverged = true;
+				uint rowsPad = rows+2, colsPad = cols+2;
+
+				//memory allocation
+				cudaMalloc((void**)&d_label, rowsPad*colsPad*sizeof(uint));
+
+				//initializing labels
+				initLabels<<<(rowsPad*colsPad-1)/threadsPerBlock.x+1, threadsPerBlock>>>(d_label, d_mapIn, rowsPad, colsPad); 
+				//computation
+				while(h_notConverged) {
+					memcpy(d_notConverged, &h_notConverged, sizeof(bool));
+					scanning<<<numBlocks, threadsPerBlock>>>(d_label, d_notConverged, rows, cols);
+					memcpy(&h_notConverged, d_notConverged, sizeof(bool));
+					h_notConverged = !h_notConverged;
+					if(h_notConverged) {
+						analysis<<<numBlocks, threadsPerBlock>>>(d_label, rows, cols);
+					}
+				}
+				uint *ncomp, ncc;
+				//memory allocation and memset ncomp to zero
+				cudaMalloc((void**)&ncomp, sizeof(uint));
+				memset(ncomp, 0, sizeof(uint));
+				//computes n0. of conn. comp. and stores in ncomp
+				computeNCC<<<numBlocks, threadsPerBlock>>>(ncomp, d_label, rows, cols);
+				//copy data(ncomp) from device to host
+				memcpy(&ncc, ncomp, sizeof(uint));
+				//print ncc
+				printf("%u\n", ncc);
+				//free up the memory
+				cudaFree(ncomp);
+
+				//free up the memory
+				cudaFree(d_label);
+				printf("answer map done...\n");
 			}
 			break;
 		}
@@ -198,7 +464,6 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 			}
 		}
 	}
-	outputMap[cell] = focusElem;
 	if(cntU == 8) {//hill
 		outputMap[cell]=sum/8;
 		*notConverged = false;
@@ -215,6 +480,8 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
 		}
 		outputMap[cell] = (localMap[3]+localMap[4])/2;
 		*notConverged = false;
+	} else {//none
+		outputMap[cell] = focusElem;
 	}
 		
 }
@@ -224,7 +491,7 @@ saturateMapParallel(uint *inputMap, uint *outputMap, bool *notConverged, uint ro
  * -Obtains threshold and passes it to the binarizeMapParallel (with one thread per cell)
  *  which puts the binarized map in d_input.
  */
-void
+__device__ void
 binarizeMap(uint *d_input, uint rows, uint cols) {
 	uint netCells = rows*cols, threshold;
 	dim3 threadsPerBlock(BLOCKSIZE);
@@ -238,12 +505,18 @@ binarizeMap(uint *d_input, uint rows, uint cols) {
  * -Calculates the sum of the values in d_input map using thrust::reduce and then
  * divides the sum with rows*cols and finally returns this value as threshold.
  */
-int
+__device__ int
 calcThreshold(uint *d_input, uint rows, uint cols) {
-	uint sum, threshold;
-	thrust::device_ptr<uint> dev_ptr(d_input);
-	sum = thrust::reduce(dev_ptr, dev_ptr+rows*cols, (uint)0, thrust::plus<uint>());
-	threshold = sum/(rows*cols);
+	uint *sum, threshold;
+	cudaMalloc((void**)&sum, sizeof(uint));
+	memset(sum, 0, sizeof(uint));
+	//thrust::device_ptr<uint> dev_ptr(d_input);
+	//sum = thrust::reduce(dev_ptr, dev_ptr+rows*cols, (uint)0, thrust::plus<uint>());
+	uint netCells = rows*cols;
+	dim3 threadsPerBlock(BLOCKSIZE);
+	dim3 numBlocks((netCells-1)/threadsPerBlock.x + 1); 
+	sumKernel<<<numBlocks, threadsPerBlock>>>(d_input, netCells, sum);
+	threshold = *sum/(rows*cols);
 	return threshold;
 }
 
@@ -260,7 +533,10 @@ binarizeMapParallel(uint *inputMap, uint rows, uint cols, uint threshold) {
 	if(i >= rows || j >= cols)
 		return;
 	uint cell = j+i*cols;
-	inputMap[cell] = (uint)(inputMap[cell]/threshold);
+	if(inputMap[cell] < threshold)
+		inputMap[cell]=0;
+	else
+		inputMap[cell]=1;
 }
 
 /*
@@ -269,7 +545,7 @@ binarizeMapParallel(uint *inputMap, uint rows, uint cols, uint threshold) {
  *  the input binary map.
  * -Then calls printNCC to calculate and print the no. of conn. comp. in the labelled map.
  */
-void
+__device__ void
 performCCLnPrintNCC(uint *d_input, uint rows, uint cols) {
 	//variable declaration
 	uint netCells = rows*cols;
@@ -287,9 +563,9 @@ performCCLnPrintNCC(uint *d_input, uint rows, uint cols) {
 	initLabels<<<(rowsPad*colsPad-1)/threadsPerBlock.x+1, threadsPerBlock>>>(d_label, d_input, rowsPad, colsPad); 
 	//computation
 	while(h_notConverged) {
-		cudaMemcpyHTD(d_notConverged, &h_notConverged, sizeof(bool));
+		memcpy(d_notConverged, &h_notConverged, sizeof(bool));
 		scanning<<<numBlocks, threadsPerBlock>>>(d_label, d_notConverged, rows, cols);
-		cudaMemcpyDTH(&h_notConverged, d_notConverged, sizeof(bool));
+		memcpy(&h_notConverged, d_notConverged, sizeof(bool));
 		h_notConverged = !h_notConverged;
 		if(h_notConverged) {
 			analysis<<<numBlocks, threadsPerBlock>>>(d_label, rows, cols);
@@ -400,7 +676,7 @@ analysis(uint *label, uint rows, uint cols) {
  *  which is nothing but the labels which match their sequential indices.
  * -And then it prints ncc(number of connected components).
  */
-void
+__device__ void
 printNCC(uint *d_input, uint rows, uint cols) {
 	uint netCells = rows*cols;
 	dim3 threadsPerBlock(BLOCKSIZE);
@@ -408,11 +684,11 @@ printNCC(uint *d_input, uint rows, uint cols) {
 	uint *ncomp, ncc;
 	//memory allocation and memset ncomp to zero
 	cudaMalloc((void**)&ncomp, sizeof(uint));
-	cudaMemset(ncomp, 0, sizeof(uint));
+	memset(ncomp, 0, sizeof(uint));
 	//computes n0. of conn. comp. and stores in ncomp
 	computeNCC<<<numBlocks, threadsPerBlock>>>(ncomp, d_input, rows, cols);
 	//copy data(ncomp) from device to host
-	cudaMemcpyDTH(&ncc, ncomp, sizeof(uint));
+	memcpy(&ncc, ncomp, sizeof(uint));
 	//print ncc
 	printf("%u\n", ncc);
 	//free up the memory
@@ -444,7 +720,7 @@ computeNCC(uint *ncomp, uint *label, uint rows, uint cols) {
  * processMap description:
  * -Transfers control to saturateMap which initiates actual processing.
  */
-void
+__device__ void
 processMap(uint *map, uint rows, uint cols) {
 	saturateMap(map, rows, cols);
 }
