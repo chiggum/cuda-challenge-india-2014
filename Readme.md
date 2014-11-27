@@ -5,7 +5,7 @@
 * Vedant Kohli
 
 ### Algorithm Description:
-#### Saturate maps:(2.3s)
+#### Saturate maps:(1.3s)
 * repeat until no hills and dales are left or MAX_ITERATIONS reached
 * One thread launched for each cell.
 * 8 surrounding cells are checked.
