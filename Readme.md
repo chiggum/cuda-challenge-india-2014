@@ -1,4 +1,4 @@
-# CUDA CHALLENGE INDIA 2017
+# CUDA CHALLENGE INDIA 2014
 
 * Winning solution
 
